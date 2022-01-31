@@ -22,6 +22,9 @@ class BC:
                  loss_type = 'MSE',  # can be 'MLE' or 'MSE'
                  save_logs = True,
                  set_transforms = False,
+                 finetune = False,
+                 proprio = 0,
+                 encoder_params = [],
                  **kwargs,
                  ):
 
@@ -32,6 +35,9 @@ class BC:
         self.logger = DataLog()
         self.loss_type = loss_type
         self.save_logs = save_logs
+        self.finetune = finetune
+        self.proprio = proprio
+        self.steps = 0
 
         if set_transforms:
             in_shift, in_scale, out_shift, out_scale = self.compute_transformations()
@@ -39,7 +45,7 @@ class BC:
             self.set_variance_with_data(out_scale)
 
         # construct optimizer
-        self.optimizer = torch.optim.Adam(self.policy.trainable_params, lr=lr) if optimizer is None else optimizer
+        self.optimizer = torch.optim.Adam(list(self.policy.trainable_params) + list(encoder_params), lr=lr) if optimizer is None else optimizer
 
         # Loss criterion if required
         if loss_type == 'MSE':
@@ -49,12 +55,14 @@ class BC:
         if self.save_logs:
             self.logger = DataLog()
 
-    def compute_transformations(self):
+    def compute_transformations(self, e):
         # get transformations
         if self.expert_paths == [] or self.expert_paths is None:
             in_shift, in_scale, out_shift, out_scale = None, None, None, None
         else:
-            observations = np.concatenate([path["observations"] for path in self.expert_paths])
+            # observations = np.concatenate([path["observations"] for path in self.expert_paths])
+            observations = np.concatenate([path["images"] for path in self.expert_paths])
+            observations = self.encodefn(observations, finetune=self.finetune)
             actions = np.concatenate([path["actions"] for path in self.expert_paths])
             in_shift, in_scale = np.mean(observations, axis=0), np.std(observations, axis=0)
             out_shift, out_scale = np.mean(actions, axis=0), np.std(actions, axis=0)
@@ -97,9 +105,16 @@ class BC:
         if type(data['observations']) is torch.Tensor:
             idx = torch.LongTensor(idx)
         obs = data['observations'][idx]
+        obs = self.encodefn(obs, finetune=self.finetune)
         act_expert = data['expert_actions'][idx]
-        if type(data['observations']) is not torch.Tensor:
-            obs = Variable(torch.from_numpy(obs).float(), requires_grad=False)
+        if type(obs) is not torch.Tensor:
+            obs = Variable(torch.from_numpy(obs).float(), requires_grad=False).cuda()
+        if self.proprio:
+            proprio= data['proprio'][idx]
+            if type(proprio) is not torch.Tensor:
+                proprio = Variable(torch.from_numpy(proprio).float(), requires_grad=False).cuda()
+            obs = torch.cat([obs, proprio], -1)
+        if type(act_expert) is not torch.Tensor:
             act_expert = Variable(torch.from_numpy(act_expert).float(), requires_grad=False)
         act_pi = self.policy.model(obs)
         return self.loss_criterion(act_pi, act_expert.detach())
@@ -125,9 +140,9 @@ class BC:
                 loss = self.loss(data, idx=rand_idx)
                 loss.backward()
                 self.optimizer.step()
+                self.steps += 1
         params_after_opt = self.policy.get_param_values()
         self.policy.set_param_values(params_after_opt, set_new=True, set_old=True)
-
         # log stats after
         if self.save_logs:
             self.logger.log_kv('epoch', self.epochs)
@@ -135,10 +150,19 @@ class BC:
             self.logger.log_kv('loss_after', loss_val)
             self.logger.log_kv('time', (timer.time()-ts))
 
-    def train(self, **kwargs):
-        observations = np.concatenate([path["observations"] for path in self.expert_paths])
+    def train(self, pixel=True, **kwargs):
+        # observations = np.concatenate([path["observations"] for path in self.expert_paths])
+        if self.proprio:
+            proprio = np.concatenate([path["observations"] for path in self.expert_paths])
+            proprio = proprio[:, :self.proprio]
+        else:
+            proprio = None
+        if pixel:
+            observations = np.concatenate([path["images"] for path in self.expert_paths])
+        else:
+            observations = np.concatenate([path["observations"] for path in self.expert_paths])
         expert_actions = np.concatenate([path["actions"] for path in self.expert_paths])
-        data = dict(observations=observations, expert_actions=expert_actions)
+        data = dict(observations=observations, proprio=proprio, expert_actions=expert_actions)
         self.fit(data, **kwargs)
 
 

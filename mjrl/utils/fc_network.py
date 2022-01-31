@@ -13,11 +13,18 @@ class FCNetwork(nn.Module):
                  out_scale = None):
         super(FCNetwork, self).__init__()
 
+        ### REMOVE
+        # obs_dim = 521
+        # self.noisegen = nn.Linear(obs_dim, 512)
+
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         assert type(hidden_sizes) == tuple
         self.layer_sizes = (obs_dim, ) + hidden_sizes + (act_dim, )
         self.set_transformations(in_shift, in_scale, out_shift, out_scale)
+        self.proprio_only = False
+        # Batch Norm Layers
+        self.bn = torch.nn.BatchNorm1d(obs_dim)
 
         # hidden layers
         self.fc_layers = nn.ModuleList([nn.Linear(self.layer_sizes[i], self.layer_sizes[i+1]) \
@@ -39,12 +46,22 @@ class FCNetwork(nn.Module):
     def forward(self, x):
         # TODO(Aravind): Remove clamping to CPU
         # This is a temp change that should be fixed shortly
+        if self.proprio_only:
+            x = x[:, :9]
+        ## PADDING to 521
+        # if x.shape[1] < 521:
+        #     noise = torch.FloatTensor(np.random.uniform(-10, 10, (x.shape[0], 521 - x.shape[1]))).to(x.device)
+        #     x = torch.cat([x, noise], -1)
+
+        # x = torch.cat([x, self.noisegen(x)], -1) ## REMOVE
         if x.is_cuda:
             out = x.to('cpu')
         else:
             out = x
-        out = (out - self.in_shift)/(self.in_scale + 1e-8)
+        # out = (out - self.in_shift)/(self.in_scale + 1e-8)
+        out = self.bn(out)
         for i in range(len(self.fc_layers)-1):
+            # out = self.bn_layers[i](out)
             out = self.fc_layers[i](out)
             out = self.nonlinearity(out)
         out = self.fc_layers[-1](out)
